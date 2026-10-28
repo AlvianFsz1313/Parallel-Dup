@@ -1,64 +1,184 @@
-name: Build APK
+
+name: Build ParallelDup APK
+
 on:
   push:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
-      - name: Ekstrak zip sumber
-        run: |
-          ZIP=$(ls *.zip | head -n 1)
-          mkdir src && unzip -o "$ZIP" -d src
-      - name: Ambil BlackBox dan deteksi versi
-        id: det
-        run: |
-          git clone --depth 1 https://github.com/FBlackBox/BlackBox.git engine
-          cp -r src/host engine/host
-          if [ -f engine/settings.gradle ]; then
-            printf "\ninclude ':host'\n" >> engine/settings.gradle
-          else
-            printf '\ninclude(":host")\n' >> engine/settings.gradle.kts
-          fi
-          echo "=== isi engine ==="; ls -la engine
-          echo "=== settings ==="; cat engine/settings.gradle* || true
-          echo "=== root build ==="; cat engine/build.gradle* || true
-          echo "=== wrapper ==="; cat engine/gradle/wrapper/gradle-wrapper.properties || true
-          echo "=== toml ==="; cat engine/gradle/libs.versions.toml || true
-          echo "=== Bcore build ==="; cat engine/Bcore/build.gradle* || true
+          java-version: "17"
 
-          G=$(grep -oE "gradle-[0-9]+\.[0-9]+(\.[0-9]+)?" engine/gradle/wrapper/gradle-wrapper.properties 2>/dev/null | head -n1 | sed 's/gradle-//' || true)
-          AGP=$(grep -rhoE "(tools\.build:gradle:|com\.android\.(application|library)['\"]? +version +['\"]|^agp *= *\")[0-9]+\.[0-9]+(\.[0-9]+)?" engine --include=*.gradle --include=*.kts --include=*.toml | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?$" | head -n1 || true)
-          MAJOR=${AGP%%.*}
-          [ -z "$MAJOR" ] && MAJOR=7
-          if [ -z "$G" ]; then
-            if [ "$MAJOR" -ge 8 ]; then G=8.7; else G=7.5.1; fi
+      - name: Check ZIP source
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP="$(find . -maxdepth 1 -type f -iname '*.zip' \
+            -print -quit)"
+
+          if [ -z "$ZIP" ]; then
+            echo "::error::ZIP source tidak ditemukan di root repository."
+            exit 1
           fi
-          echo "Terdeteksi AGP=$AGP Gradle=$G"
-          echo "gradle=$G" >> "$GITHUB_OUTPUT"
-          if [ "$MAJOR" -ge 8 ]; then
-            sed -i "s/compileSdkVersion 31/compileSdkVersion 34\n    namespace 'com.example.paralleldup'/" engine/host/build.gradle
+
+          echo "ZIP ditemukan: $ZIP"
+          mkdir -p src
+          unzip -oq "$ZIP" -d src
+
+          if [ ! -f src/host/build.gradle ]; then
+            echo "::error::src/host/build.gradle tidak ditemukan."
+            echo "Isi ZIP:"
+            find src -maxdepth 5 -type f | head -100
+            exit 1
           fi
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: ${{ steps.det.outputs.gradle }}
-      - name: Terima lisensi SDK
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-      - name: Build
+
+          echo "Source host ditemukan."
+          find src -maxdepth 4 -type f | head -100
+
+      - name: Download BlackBox engine
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone --depth 1 \
+            https://github.com/Black00Z/Blacks-BlackBox.git \
+            engine
+
+          if [ ! -d engine/Bcore ]; then
+            echo "::error::Modul Bcore tidak ditemukan."
+            exit 1
+          fi
+
+          if [ ! -f engine/settings.gradle ]; then
+            echo "::error::settings.gradle engine tidak ditemukan."
+            exit 1
+          fi
+
+      - name: Install ParallelDup host module
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf engine/host
+          cp -a src/host engine/host
+
+          echo "=== Modul Gradle ==="
+          grep -nE "include|project" engine/settings.gradle || true
+
+          echo "=== Host build configuration ==="
+          cat engine/host/build.gradle
+
+          echo "=== Manifest ==="
+          test -f engine/host/src/main/AndroidManifest.xml
+
+      - name: Configure Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+
+      - name: Check Gradle configuration
         working-directory: engine
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Java ==="
+          java -version
+
+          echo "=== Gradle wrapper ==="
+          if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
+            cat gradle/wrapper/gradle-wrapper.properties
+          else
+            echo "::error::Gradle wrapper properties tidak ditemukan."
+            exit 1
+          fi
+
+          echo "=== Root build files ==="
+          ls -la
+          cat settings.gradle
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        working-directory: engine
+        shell: bash
         run: |
           set -o pipefail
-          gradle :host:assembleDebug --stacktrace 2>&1 | tee ../build.log
-      - name: Ringkasan error
+
+          chmod +x gradlew
+
+          ./gradlew :host:assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all \
+            2>&1 | tee ../build.log
+
+      - name: Show build errors
         if: failure()
-        run: grep -B2 -A14 "What went wrong" build.log | head -60 || true
-      - uses: actions/upload-artifact@v4
+        shell: bash
+        run: |
+          echo "=== Error summary ==="
+          if [ -f build.log ]; then
+            grep -n -E \
+              "What went wrong|Execution failed|Could not resolve|Could not find|error:|FAILURE:|SDK location not found" \
+              build.log | tail -80 || true
+
+            echo "=== Last 150 log lines ==="
+            tail -150 build.log
+          fi
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
         with:
-          name: ParallelDup-apk
+          name: ParallelDup-build-log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Verify APK output
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find engine/host/build/outputs/apk/debug \
+            -maxdepth 1 -type f -name '*.apk' -print -quit)"
+
+          if [ -z "$APK" ]; then
+            echo "::error::Build selesai tetapi APK tidak ditemukan."
+            exit 1
+          fi
+
+          echo "APK berhasil dibuat: $APK"
+          ls -lh "$APK"
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ParallelDup-debug-APK
           path: engine/host/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
           
