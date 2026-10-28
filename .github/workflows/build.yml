@@ -1,0 +1,40 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+      - name: Ekstrak zip sumber
+        run: |
+          ZIP=$(ls *.zip | head -n 1)
+          echo "Memakai $ZIP"
+          mkdir src && unzip -o "$ZIP" -d src
+          ls src
+      - name: Ambil engine virtual (BlackBox) dan tempelkan modul host
+        run: |
+          git clone --depth 1 https://github.com/FBlackBox/BlackBox.git engine
+          cp -r src/host engine/host
+          if [ -f engine/settings.gradle ]; then
+            printf "\ninclude ':host'\n" >> engine/settings.gradle
+          else
+            printf '\ninclude(":host")\n' >> engine/settings.gradle.kts
+          fi
+      - name: Terima lisensi SDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Build
+        working-directory: engine
+        run: |
+          chmod +x gradlew
+          ./gradlew :host:assembleDebug --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ParallelDup-apk
+          path: engine/host/build/outputs/apk/debug/*.apk
+          
