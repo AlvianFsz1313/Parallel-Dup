@@ -11,12 +11,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '11'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '7.5.1'
       - name: Ekstrak zip sumber
         run: |
           ZIP=$(ls *.zip | head -n 1)
           echo "Memakai $ZIP"
           mkdir src && unzip -o "$ZIP" -d src
-          ls src
       - name: Ambil engine virtual (BlackBox) dan tempelkan modul host
         run: |
           git clone --depth 1 https://github.com/FBlackBox/BlackBox.git engine
@@ -26,13 +28,14 @@ jobs:
           else
             printf '\ninclude(":host")\n' >> engine/settings.gradle.kts
           fi
+          echo "=== isi engine ==="; ls -la engine
+          echo "=== settings ==="; cat engine/settings.gradle* || true
+          echo "=== build.gradle root ==="; cat engine/build.gradle* || true
       - name: Terima lisensi SDK
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
       - name: Build
         working-directory: engine
-        run: |
-          chmod +x gradlew
-          ./gradlew :host:assembleDebug --stacktrace
+        run: gradle :host:assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: ParallelDup-apk
