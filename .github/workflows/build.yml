@@ -10,16 +10,13 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '11'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '7.5.1'
+          java-version: '17'
       - name: Ekstrak zip sumber
         run: |
           ZIP=$(ls *.zip | head -n 1)
-          echo "Memakai $ZIP"
           mkdir src && unzip -o "$ZIP" -d src
-      - name: Ambil engine virtual (BlackBox) dan tempelkan modul host
+      - name: Ambil BlackBox dan deteksi versi
+        id: det
         run: |
           git clone --depth 1 https://github.com/FBlackBox/BlackBox.git engine
           cp -r src/host engine/host
@@ -30,12 +27,36 @@ jobs:
           fi
           echo "=== isi engine ==="; ls -la engine
           echo "=== settings ==="; cat engine/settings.gradle* || true
-          echo "=== build.gradle root ==="; cat engine/build.gradle* || true
+          echo "=== root build ==="; cat engine/build.gradle* || true
+          echo "=== wrapper ==="; cat engine/gradle/wrapper/gradle-wrapper.properties || true
+          echo "=== toml ==="; cat engine/gradle/libs.versions.toml || true
+          echo "=== Bcore build ==="; cat engine/Bcore/build.gradle* || true
+
+          G=$(grep -oE "gradle-[0-9]+\.[0-9]+(\.[0-9]+)?" engine/gradle/wrapper/gradle-wrapper.properties 2>/dev/null | head -n1 | sed 's/gradle-//' || true)
+          AGP=$(grep -rhoE "(tools\.build:gradle:|com\.android\.(application|library)['\"]? +version +['\"]|^agp *= *\")[0-9]+\.[0-9]+(\.[0-9]+)?" engine --include=*.gradle --include=*.kts --include=*.toml | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?$" | head -n1 || true)
+          MAJOR=${AGP%%.*}
+          [ -z "$MAJOR" ] && MAJOR=7
+          if [ -z "$G" ]; then
+            if [ "$MAJOR" -ge 8 ]; then G=8.7; else G=7.5.1; fi
+          fi
+          echo "Terdeteksi AGP=$AGP Gradle=$G"
+          echo "gradle=$G" >> "$GITHUB_OUTPUT"
+          if [ "$MAJOR" -ge 8 ]; then
+            sed -i "s/compileSdkVersion 31/compileSdkVersion 34\n    namespace 'com.example.paralleldup'/" engine/host/build.gradle
+          fi
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ steps.det.outputs.gradle }}
       - name: Terima lisensi SDK
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
       - name: Build
         working-directory: engine
-        run: gradle :host:assembleDebug --stacktrace
+        run: |
+          set -o pipefail
+          gradle :host:assembleDebug --stacktrace 2>&1 | tee ../build.log
+      - name: Ringkasan error
+        if: failure()
+        run: grep -B2 -A14 "What went wrong" build.log | head -60 || true
       - uses: actions/upload-artifact@v4
         with:
           name: ParallelDup-apk
